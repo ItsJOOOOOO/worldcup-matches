@@ -154,8 +154,9 @@ app.get("/proxy", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 5001;
+const app = express();
 
-app.listen(PORT, () => {
-  console.log(`Stream proxy running on port ${PORT}`);
+app.use((req, res, next) => {
+  console.log("REQ:", req.method, req.url);
+  next();
 });
