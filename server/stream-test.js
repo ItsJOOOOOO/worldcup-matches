@@ -14,6 +14,11 @@ app.use(
   })
 );
 
+app.use((req, res, next) => {
+  console.log("REQ:", req.method, req.url);
+  next();
+});
+
 const SOURCE = process.env.STREAM_URL;
 
 if (!SOURCE) {
@@ -22,11 +27,17 @@ if (!SOURCE) {
 
 const SOURCE_ORIGIN = new URL(SOURCE).origin;
 
-function toProxyUrl(url) {
-  return `/proxy?url=${encodeURIComponent(url)}`;
+function getBaseUrl(req) {
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const proto = req.headers["x-forwarded-proto"] || "http";
+  return `${proto}://${host}`;
 }
 
-function rewritePlaylist(text, baseUrl) {
+function toProxyUrl(url, req) {
+  return `${getBaseUrl(req)}/proxy?url=${encodeURIComponent(url)}`;
+}
+
+function rewritePlaylist(text, baseUrl, req) {
   return text
     .split(/\r?\n/)
     .map((line) => {
@@ -37,12 +48,12 @@ function rewritePlaylist(text, baseUrl) {
       if (trimmed.startsWith("#")) {
         return line.replace(/URI="([^"]+)"/g, (full, uri) => {
           const absolute = new URL(uri, baseUrl).href;
-          return `URI="${toProxyUrl(absolute)}"`;
+          return `URI="${toProxyUrl(absolute, req)}"`;
         });
       }
 
       const absolute = new URL(trimmed, baseUrl).href;
-      return toProxyUrl(absolute);
+      return toProxyUrl(absolute, req);
     })
     .join("\n");
 }
@@ -67,7 +78,16 @@ app.get("/", (req, res) => {
   res.send("Stream proxy is running");
 });
 
-app.get("/playlist.m3u8", async (req, res) => {
+app.get("/debug", (req, res) => {
+  res.json({
+    ok: true,
+    message: "Debug route is working",
+    hasStreamUrl: !!process.env.STREAM_URL,
+    sourceOrigin: SOURCE_ORIGIN,
+  });
+});
+
+async function handlePlaylist(req, res) {
   try {
     const upstream = await fetchLikeVlc(SOURCE, req);
 
@@ -76,7 +96,7 @@ app.get("/playlist.m3u8", async (req, res) => {
 
     const text = await upstream.text();
 
-    console.log("First chars:", text.slice(0, 80));
+    console.log("First chars:", text.slice(0, 120));
 
     if (!text.includes("#EXTM3U")) {
       return res
@@ -84,7 +104,7 @@ app.get("/playlist.m3u8", async (req, res) => {
         .send("Source did not return M3U8 playlist:\n\n" + text);
     }
 
-    const rewritten = rewritePlaylist(text, SOURCE);
+    const rewritten = rewritePlaylist(text, SOURCE, req);
 
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
@@ -95,7 +115,12 @@ app.get("/playlist.m3u8", async (req, res) => {
     console.error("Playlist error:", error);
     res.status(500).send(error.message);
   }
-});
+}
+
+app.get("/playlist.m3u8", handlePlaylist);
+app.get("/playlist", handlePlaylist);
+app.get("/index.m3u8", handlePlaylist);
+app.get("/live.m3u8", handlePlaylist);
 
 app.get("/proxy", async (req, res) => {
   try {
@@ -105,13 +130,18 @@ app.get("/proxy", async (req, res) => {
       return res.status(400).send("Missing url");
     }
 
+    console.log("PROXY TARGET:", targetUrl);
+
     const target = new URL(targetUrl);
 
     if (target.origin !== SOURCE_ORIGIN) {
+      console.log("BLOCKED ORIGIN:", target.origin);
       return res.status(403).send("Blocked URL");
     }
 
     const upstream = await fetchLikeVlc(targetUrl, req);
+
+    console.log("UPSTREAM STATUS:", upstream.status, targetUrl);
 
     const contentType =
       upstream.headers.get("content-type") || "application/octet-stream";
@@ -135,7 +165,7 @@ app.get("/proxy", async (req, res) => {
 
     if (isPlaylist) {
       const text = await upstream.text();
-      const rewritten = rewritePlaylist(text, targetUrl);
+      const rewritten = rewritePlaylist(text, targetUrl, req);
 
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       return res.send(rewritten);
@@ -154,9 +184,8 @@ app.get("/proxy", async (req, res) => {
   }
 });
 
-const app = express();
+const PORT = process.env.PORT || 5001;
 
-app.use((req, res, next) => {
-  console.log("REQ:", req.method, req.url);
-  next();
+app.listen(PORT, () => {
+  console.log(`Stream proxy running on port ${PORT}`);
 });
