@@ -1,12 +1,24 @@
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const { Readable } = require("stream");
 
 const app = express();
-app.use(cors());
 
-const SOURCE =
-  "https://s3.eu-north-1.amazonaws.com/sirtv-a2f5f6ef/hls/siiirtv2/_hd/stream";
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "HEAD", "OPTIONS"],
+    allowedHeaders: ["*"],
+  })
+);
+
+const SOURCE = process.env.STREAM_URL;
+
+if (!SOURCE) {
+  throw new Error("STREAM_URL is missing in .env or Render Environment Variables");
+}
 
 const SOURCE_ORIGIN = new URL(SOURCE).origin;
 
@@ -67,18 +79,20 @@ app.get("/playlist.m3u8", async (req, res) => {
     console.log("First chars:", text.slice(0, 80));
 
     if (!text.includes("#EXTM3U")) {
-      return res.status(500).send("Source did not return M3U8 playlist:\n\n" + text);
+      return res
+        .status(500)
+        .send("Source did not return M3U8 playlist:\n\n" + text);
     }
 
     const rewritten = rewritePlaylist(text, SOURCE);
 
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
 
     res.send(rewritten);
   } catch (error) {
-    console.error(error);
+    console.error("Playlist error:", error);
     res.status(500).send(error.message);
   }
 });
@@ -104,7 +118,7 @@ app.get("/proxy", async (req, res) => {
 
     res.status(upstream.status);
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
 
     const contentLength = upstream.headers.get("content-length");
     const contentRange = upstream.headers.get("content-range");
@@ -114,24 +128,34 @@ app.get("/proxy", async (req, res) => {
     if (contentRange) res.setHeader("Content-Range", contentRange);
     if (acceptRanges) res.setHeader("Accept-Ranges", acceptRanges);
 
-    if (contentType.includes("mpegurl") || targetUrl.includes(".m3u8")) {
+    const isPlaylist =
+      contentType.includes("mpegurl") ||
+      contentType.includes("m3u8") ||
+      targetUrl.includes(".m3u8");
+
+    if (isPlaylist) {
       const text = await upstream.text();
       const rewritten = rewritePlaylist(text, targetUrl);
+
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       return res.send(rewritten);
     }
 
     res.setHeader("Content-Type", contentType);
 
-    if (!upstream.body) return res.end();
+    if (!upstream.body) {
+      return res.end();
+    }
 
     Readable.fromWeb(upstream.body).pipe(res);
   } catch (error) {
-    console.error(error);
+    console.error("Proxy error:", error);
     res.status(500).send(error.message);
   }
 });
 
-app.listen(5001, () => {
-  console.log("Stream test running on http://localhost:5001");
+const PORT = process.env.PORT || 5001;
+
+app.listen(PORT, () => {
+  console.log(`Stream proxy running on port ${PORT}`);
 });
